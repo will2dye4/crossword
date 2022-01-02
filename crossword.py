@@ -1,7 +1,5 @@
 from collections import defaultdict
 from functools import lru_cache
-from itertools import permutations
-from math import factorial
 from multiprocessing import cpu_count, Process, Queue
 from typing import Optional
 import os
@@ -209,35 +207,6 @@ class CrosswordGenerator:
         for column_index in range(self.column_count):
             prefix = ''.join(puzzle_prefix[row_index][column_index] for row_index in range(len(puzzle_prefix)))
             if not self.tries[self.row_count].all_words_with_prefix(prefix):
-                return False
-        return True
-
-    def generate_old(self) -> Optional[list[str]]:
-        start = time.time()
-        self.attempts = 0
-        row_words = self.tries[self.column_count].all_words
-        num_permutations = factorial(len(row_words)) // factorial(len(row_words) - self.row_count)
-        print(f'Generating a {self.row_count}x{self.column_count} puzzle '
-              f'(considering {num_permutations:,} permutations)...')
-
-        for permutation in permutations(row_words, r=self.row_count):
-            self.attempts += 1
-            if self.is_valid(permutation):
-                end = time.time()
-                print(f'Total attempts: {self.attempts:,} ({end - start:0.2f} seconds)')
-                return list(permutation)
-
-        print('Failed to generate puzzle!')
-        return None
-
-    def is_valid(self, words: tuple[str, ...]) -> bool:
-        # Assumes a rectangular grid with no blank cells
-        top_word = words[0]
-        for index in range(len(top_word)):
-            maybe_word = ''
-            for word in words:
-                maybe_word += word[index]
-            if maybe_word not in self.tries[len(maybe_word)].all_words:
                 return False
         return True
 
