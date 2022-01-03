@@ -1,8 +1,12 @@
+#!/usr/bin/env python3
+
 from collections import defaultdict
 from functools import lru_cache
 from multiprocessing import cpu_count, Process, Queue
 from typing import Optional
 import os
+import queue
+import select
 import sys
 import time
 
@@ -68,6 +72,16 @@ class Trie:
                 return set()
         return node.all_child_words
 
+    @lru_cache(maxsize=128)
+    def has_prefix(self, prefix: str) -> bool:
+        node = self.root
+        for character in prefix:
+            if character in node.children:
+                node = node.children[character]
+            else:
+                return False
+        return True
+
     def add_word(self, word: str) -> None:
         node = self.root
         for index, character in enumerate(word):
@@ -109,6 +123,55 @@ def make_tries() -> dict[int, Trie]:
     return tries
 
 
+class CrosswordProcess(Process):
+
+    def __init__(self, i: int, puzzle_q: Queue, attempts_q: Queue, generator: 'CrosswordGenerator', **kwargs) -> None:
+        super().__init__()
+        self.i = i
+        self.puzzle_q = puzzle_q
+        self.attempts_q = attempts_q
+        self.generator = generator
+        self.kwargs = kwargs
+        self.attempts = 0
+
+    @property
+    def row_count(self) -> int:
+        return self.generator.row_count
+
+    @property
+    def column_count(self) -> int:
+        return self.generator.column_count
+
+    @property
+    def tries(self) -> dict[int, Trie]:
+        return self.generator.tries
+
+    def run(self, row_candidates: Optional[list[str]] = None, prefix: Optional[list[str]] = None) -> Optional[list[str]]:
+        if prefix is None:
+            prefix = []
+        if row_candidates is None:
+            row_candidates = list(self.tries[self.column_count].all_words - set(prefix))
+
+        if len(prefix) == self.row_count:
+            return prefix
+
+        puzzle = None
+        while puzzle is None and row_candidates:
+            self.attempts += 1
+            if self.attempts % 1_000_000 == 0:
+                try:
+                    self.attempts_q.put((self.i, self.attempts), block=False)
+                except queue.Full:
+                    print(f'{self.name} - queue full (count = {self.attempts})')
+            next_row = row_candidates.pop()
+            if self.generator.is_valid_puzzle_prefix(prefix + [next_row]):
+                puzzle = self.run(prefix=prefix + [next_row])
+
+        if puzzle:
+            self.puzzle_q.put(puzzle)
+        return puzzle
+
+
 class CrosswordGenerator:
 
     def __init__(self, row_count: int, column_count: int) -> None:
@@ -138,7 +201,7 @@ class CrosswordGenerator:
         return puzzle
 
     def generate(self) -> Optional[list[str]]:
-        if self.row_count > 4 and self.column_count > 4:
+        if self.row_count > 5 and self.column_count > 5:
             return self.generate_parallel()
 
         start = time.time()
@@ -146,55 +209,42 @@ class CrosswordGenerator:
         print(f'Generating a {self.row_count}x{self.column_count} puzzle...')
         puzzle = self._generate()
         end = time.time()
-        if puzzle:
-            print(f'Total attempts: {self.attempts:,} ({end - start:0.2f} seconds)')
-        else:
-            print('Failed to generate puzzle!')
-        return puzzle
-
-    def _generate_parallel(self, q: Queue, row_candidates: Optional[list[str]] = None,
-                           prefix: Optional[list[str]] = None) -> Optional[list[str]]:
-        if prefix is None:
-            prefix = []
-        if row_candidates is None:
-            row_candidates = list(self.tries[self.column_count].all_words - set(prefix))
-
-        if len(prefix) == self.row_count:
-            return prefix
-
-        puzzle = None
-        while puzzle is None and row_candidates:
-            self.attempts += 1
-            next_row = row_candidates.pop()
-            if self.is_valid_puzzle_prefix(prefix + [next_row]):
-                puzzle = self._generate_parallel(q, prefix=prefix + [next_row])
-
-        if puzzle:
-            q.put(puzzle)
+        print(f'Total attempts: {self.attempts:,} ({end - start:0.2f} seconds)')
         return puzzle
 
     def generate_parallel(self) -> Optional[list[str]]:
         start = time.time()
+        num_cpus = cpu_count()
         self.attempts = 0
         print(f'Generating a {self.row_count}x{self.column_count} puzzle...')
 
-        num_cpus = cpu_count()
+        attempts = [0] * num_cpus
+        attempts_q = Queue()
         all_row_candidates = list(self.tries[self.column_count].all_words)
         candidates_per_process = len(all_row_candidates) // num_cpus
         processes = []
-        q = Queue()
+        puzzle_q = Queue()
         for i in range(num_cpus):
             start_index = i * candidates_per_process
             end_index = len(all_row_candidates) if i == num_cpus - 1 else start_index + candidates_per_process
             row_candidates = all_row_candidates[start_index:end_index]
-            process = Process(target=self._generate_parallel, args=(q, row_candidates))
+            process = CrosswordProcess(i, puzzle_q, attempts_q, self, args=(row_candidates,))
             process.start()
             processes.append(process)
 
         print(f'Started {num_cpus} child processes; waiting for result...')
-        puzzle = q.get()
+
+        puzzle = None
+        while not puzzle:
+            ready_qs, _, _ = select.select([attempts_q._reader, puzzle_q._reader], [], [])
+            if any(fd == puzzle_q._reader for fd in ready_qs):
+                puzzle = puzzle_q.get()
+            else:
+                index, count = attempts_q.get()
+                attempts[index] = count
+
         end = time.time()
-        print(f'Generated puzzle in {end - start:0.2f} seconds')
+        print(f'Total attempts: ~{sum(attempts):,} ({end - start:0.2f} seconds)')
 
         for process in processes:
             process.terminate()
@@ -206,23 +256,26 @@ class CrosswordGenerator:
         # Assumes a rectangular grid with no blank cells
         for column_index in range(self.column_count):
             prefix = ''.join(puzzle_prefix[row_index][column_index] for row_index in range(len(puzzle_prefix)))
-            if not self.tries[self.row_count].all_words_with_prefix(prefix):
+            if not self.tries[self.row_count].has_prefix(prefix):
                 return False
         return True
 
 
 def main() -> None:
     if len(sys.argv) < 3:
-        rows = 4
-        columns = 4
+        rows = 5
+        columns = 5
     else:
         rows = int(sys.argv[1])
         columns = int(sys.argv[2])
     generator = CrosswordGenerator(row_count=rows, column_count=columns)
     puzzle = generator.generate()
     print()
-    for word in puzzle:
-        print(' '.join(word))
+    if puzzle:
+        for word in puzzle:
+            print(' '.join(word))
+    else:
+        print('Failed to generate puzzle!')
 
 
 if __name__ == '__main__':
