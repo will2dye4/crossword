@@ -106,7 +106,6 @@ class Trie:
 
 
 def make_tries() -> dict[int, Trie]:
-    #start = time.time()
     filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'wordlist.txt')
     with open(filepath) as f:
         lines = f.readlines()
@@ -118,8 +117,6 @@ def make_tries() -> dict[int, Trie]:
             if line:
                 tries[len(line)].add_word(line)
                 word_count += 1
-    #end = time.time()
-    #print(f'Initialized crossword tries with {word_count:,} words in {end - start:0.2f} seconds')
     return tries
 
 
@@ -201,7 +198,7 @@ class CrosswordGenerator:
         return puzzle
 
     def generate(self) -> Optional[list[str]]:
-        if self.row_count > 5 and self.column_count > 5:
+        if self.row_count * self.column_count > 30:
             return self.generate_parallel()
 
         start = time.time()
