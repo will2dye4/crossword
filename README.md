@@ -1,4 +1,4 @@
-# crossword - word grid generator
+# crossword &mdash; word grid generator
 
 This is a Python script for generating grids of words. It allows you to specify
 the number of rows and columns you want and attempts to generate a grid of words
@@ -18,7 +18,7 @@ for the word grid. If you only specify one or neither, the default is 5x5.
 ### Examples
 
 ```
-$ ./crossword.py 5 5
+$ ./crossword.py
 Generating a 5x5 puzzle...
 Total attempts: 5,511,270 (5.33 seconds)
 
